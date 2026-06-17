@@ -56,6 +56,19 @@
   stroke-linejoin: round;
 }
 
+// Keyboard focus ring for interactive labels/figures. :focus-visible keeps the
+// ring off mouse clicks (the reason tabindex was originally avoided) while
+// showing it for keyboard navigation.
+.focusable {
+  &:focus {
+    outline: none;
+  }
+  &:focus-visible {
+    outline: 2px solid var(--synapse-primary-action-color, #2360a6);
+    outline-offset: 3px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .root {
     transition: none;

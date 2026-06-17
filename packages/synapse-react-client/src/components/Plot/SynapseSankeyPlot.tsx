@@ -82,7 +82,25 @@ type LinkDatum = {
   side: 'left' | 'right'
 }
 type LaidOutNode = D3SankeyNode<NodeDatum, LinkDatum>
-type InteractiveProps = { cursor?: 'pointer'; onClick?: () => void }
+type InteractiveProps = {
+  cursor?: 'pointer'
+  onClick?: () => void
+  // Present only on the one keyboard-focusable target per action.
+  tabIndex?: number
+  role?: 'button'
+  'aria-label'?: string
+  onKeyDown?: React.KeyboardEventHandler
+}
+
+// Enter/Space activate a focusable SVG control like a button.
+const onActivateKey =
+  (run: () => void): React.KeyboardEventHandler =>
+  e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      run()
+    }
+  }
 
 // Coordinate space of the SVG. The rendered width is capped at VIEW_W (see the
 // wrapper's maxWidth) so one viewBox unit ≈ one CSS pixel and text renders at
@@ -133,7 +151,11 @@ function SankeyEndFigure(props: {
     align === 'left' ? (node.x0 ?? 0) - LABEL_GAP : (node.x1 ?? 0) + LABEL_GAP
   const textAnchor = align === 'left' ? 'end' : 'start'
   return (
-    <g onMouseEnter={onMouseEnter} {...interactiveProps}>
+    <g
+      className={styles.focusable}
+      onMouseEnter={onMouseEnter}
+      {...interactiveProps}
+    >
       <text
         x={x}
         y={cy - 22}
@@ -190,7 +212,7 @@ function SankeyCategoryLabel(props: {
   return (
     <g
       opacity={opacity}
-      className={styles.categoryLabel}
+      className={classNames(styles.categoryLabel, styles.focusable)}
       onMouseEnter={onMouseEnter}
       {...interactiveProps}
     >
@@ -271,7 +293,7 @@ function SankeyCenterLabel(props: {
   return (
     <g
       opacity={opacity}
-      className={styles.categoryLabel}
+      className={classNames(styles.categoryLabel, styles.focusable)}
       onMouseEnter={onMouseEnter}
       {...interactiveProps}
     >
@@ -578,6 +600,41 @@ export const SynapseSankeyPlot = (
       : {}
   const endProps = (fire: (() => void) | undefined): InteractiveProps =>
     fire ? { cursor: 'pointer', onClick: fire } : {}
+  // Focusable variants for the one keyboard target per action: the labels and
+  // end figures. Ribbons/nodes keep the mouse-only props above so they don't
+  // add redundant tab stops.
+  const focusableFlow = (
+    sourceIndex: number,
+    fire: (() => void) | undefined,
+    ariaLabel: string,
+  ): InteractiveProps => {
+    if (!fire) {
+      return {}
+    }
+    const run = () => activate(sourceIndex, fire)
+    return {
+      cursor: 'pointer',
+      onClick: run,
+      tabIndex: 0,
+      role: 'button',
+      'aria-label': ariaLabel,
+      onKeyDown: onActivateKey(run),
+    }
+  }
+  const focusableEnd = (
+    fire: (() => void) | undefined,
+    ariaLabel: string,
+  ): InteractiveProps =>
+    fire
+      ? {
+          cursor: 'pointer',
+          onClick: fire,
+          tabIndex: 0,
+          role: 'button',
+          'aria-label': ariaLabel,
+          onKeyDown: onActivateKey(fire),
+        }
+      : {}
   // The "datasets" (left) handler fires for a center node and its left flow.
   const categoryFire = (name: string) =>
     onCategoryClick ? () => onCategoryClick(name) : undefined
@@ -591,7 +648,16 @@ export const SynapseSankeyPlot = (
       )}
       <svg
         viewBox={`0 0 ${VIEW_W} ${viewH}`}
-        role="img"
+        // When interactive, the chart is a group of focusable buttons; role=img
+        // would hide them from assistive tech.
+        role={
+          onCategoryClick ||
+          onRightCategoryClick ||
+          onRootClick ||
+          onRightEndClick
+            ? 'group'
+            : 'img'
+        }
         aria-label={
           breakdownLabel
             ? `${rootLabel} broken down ${breakdownLabel}`
@@ -690,7 +756,10 @@ export const SynapseSankeyPlot = (
                 unitLabel={unitLabel}
                 align="left"
                 onMouseEnter={() => setHovered(null)}
-                interactiveProps={endProps(onRootClick)}
+                interactiveProps={focusableEnd(
+                  onRootClick,
+                  `${rootLabel}: ${totalLeft.toLocaleString()} ${unitLabel}`,
+                )}
               />
             )
           }
@@ -703,24 +772,33 @@ export const SynapseSankeyPlot = (
                 unitLabel={rightUnitLabel}
                 align="right"
                 onMouseEnter={() => setHovered(null)}
-                interactiveProps={endProps(onRightEndClick)}
+                interactiveProps={focusableEnd(
+                  onRightEndClick,
+                  `${rightLabel}: ${totalRight.toLocaleString()} ${rightUnitLabel}`,
+                )}
               />
             )
           }
           const sourceIndex = (node.index ?? 1) - 1
           const fire = categoryFire(node.name)
           if (hasRightFlow) {
+            const leftValue = node.leftValue ?? 0
+            const rightValue = node.rightValue ?? 0
             return (
               <SankeyCenterLabel
                 key={`lab-${i}`}
                 node={node}
-                leftValue={node.leftValue ?? 0}
-                rightValue={node.rightValue ?? 0}
+                leftValue={leftValue}
+                rightValue={rightValue}
                 unitLabel={unitLabel}
                 rightUnitLabel={rightUnitLabel}
                 opacity={labelOpacity(sourceIndex)}
                 onMouseEnter={() => setHovered(sourceIndex)}
-                interactiveProps={flowProps(sourceIndex, fire)}
+                interactiveProps={focusableFlow(
+                  sourceIndex,
+                  fire,
+                  `${node.name}: ${leftValue.toLocaleString()} ${unitLabel}, ${rightValue.toLocaleString()} ${rightUnitLabel}`,
+                )}
               />
             )
           }
@@ -731,7 +809,11 @@ export const SynapseSankeyPlot = (
               total={totalLeft}
               opacity={labelOpacity(sourceIndex)}
               onMouseEnter={() => setHovered(sourceIndex)}
-              interactiveProps={flowProps(sourceIndex, fire)}
+              interactiveProps={focusableFlow(
+                sourceIndex,
+                fire,
+                `${node.name}: ${(node.value ?? 0).toLocaleString()} ${unitLabel}`,
+              )}
             />
           )
         })}

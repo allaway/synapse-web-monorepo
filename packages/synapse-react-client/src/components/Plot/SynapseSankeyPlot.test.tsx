@@ -183,7 +183,8 @@ describe('SynapseSankeyPlot', () => {
         onRightCategoryClick,
       })
 
-      await screen.findByRole('img')
+      // When interactive the chart is a group of buttons (not role="img").
+      await screen.findByText('Gene Expression Omnibus')
 
       // Links are emitted left flows first, then right flows. With two sources,
       // path index 2 is the first source's right (files) ribbon.
@@ -196,6 +197,37 @@ describe('SynapseSankeyPlot', () => {
         ),
       )
     })
+  })
+
+  it('exposes interactive categories as keyboard-activatable buttons', async () => {
+    const user = userEvent.setup()
+    const onCategoryClick = vi.fn()
+    getResultsSpy.mockResolvedValue(labelFirstBundle)
+    renderComponent({ unitLabel: 'datasets', onCategoryClick })
+
+    // The category is a focusable button with an accessible name.
+    const button = await screen.findByRole('button', {
+      name: 'Gene Expression Omnibus: 40 datasets',
+    })
+    expect(button).toHaveAttribute('tabindex', '0')
+
+    // It activates via the keyboard (after the brief swell delay).
+    button.focus()
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      expect(onCategoryClick).toHaveBeenCalledWith('Gene Expression Omnibus'),
+    )
+  })
+
+  it('renders a non-interactive chart as a single labeled image', async () => {
+    getResultsSpy.mockResolvedValue(labelFirstBundle)
+    renderComponent({ breakdownLabel: 'by source' })
+
+    // With no handlers the chart stays role="img" and exposes no buttons.
+    await screen.findByRole('img', {
+      name: 'All Datasets broken down by source',
+    })
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('renders nothing when the query returns no rows', async () => {
