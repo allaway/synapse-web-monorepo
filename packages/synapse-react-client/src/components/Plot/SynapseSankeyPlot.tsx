@@ -13,11 +13,27 @@ import tinycolor from 'tinycolor2'
 import classNames from 'classnames'
 import styles from './SynapseSankeyPlot.module.scss'
 
+/** One tier of the collapsed funnel (see `tiers`). */
+export type SankeyTier = {
+  /** Tier name, e.g. "Studies". */
+  label: string
+  /** Total count for the tier, shown as the node's figure. */
+  value: number
+  /** Invoked when the tier's node/label is clicked. */
+  onClick?: () => void
+}
+
 export type SynapseSankeyPlotProps = {
-  /** SQL query providing the node labels and link values (see labelColumn/valueColumn) */
-  sql: string
-  /** Label for the left end node that links to every row returned by the query */
-  rootLabel: string
+  /**
+   * SQL query providing the node labels and link values (see
+   * labelColumn/valueColumn). Required unless `tiers` is provided.
+   */
+  sql?: string
+  /**
+   * Label for the left end node that links to every row returned by the query.
+   * Required for the query-driven chart; ignored in `tiers` (funnel) mode.
+   */
+  rootLabel?: string
   /** Optional plot title */
   title?: string
   /**
@@ -62,9 +78,18 @@ export type SynapseSankeyPlotProps = {
   onRightCategoryClick?: (categoryLabel: string) => void
   /** Invoked when the right end node (rightLabel) is clicked. */
   onRightEndClick?: () => void
+  /**
+   * Renders a collapsed multi-tier funnel instead of the query-driven chart:
+   * one node per tier in a left-to-right flow, each labeled with its count.
+   * When provided, `sql` and the column/butterfly props are ignored and the
+   * counts come straight from `tiers` (the consumer fetches them). Ribbon and
+   * node sizes reflect the per-tier counts (compressed so small tiers stay
+   * visible); the exact values are shown as labels.
+   */
+  tiers?: SankeyTier[]
 }
 
-// Datum shapes for the d3-sankey graph.
+// Datum shapes for the d3-sankey graph (query-driven hub-and-spoke / butterfly).
 type NodeKind = 'leftEnd' | 'source' | 'rightEnd'
 type NodeDatum = {
   name: string
@@ -111,9 +136,41 @@ const BUTTERFLY_ROW_HEIGHT = 64
 const BUTTERFLY_NODE_PADDING = 56
 const BUTTERFLY_GUTTER_TOP = 44
 const BUTTERFLY_GUTTER_X = 160
+// Funnel mode: a short, horizontally-spread flow of single tier nodes. The top
+// gutter leaves room for each tier's stacked figure (count + label) above its
+// node; side gutters keep the first/last figures from clipping.
+const FUNNEL_VIEW_H = 300
+const FUNNEL_GUTTER_TOP = 92
+const FUNNEL_GUTTER_BOTTOM = 28
+const FUNNEL_GUTTER_X = 110
 
 const midY = (node: LaidOutNode) => ((node.y0 ?? 0) + (node.y1 ?? 0)) / 2
 const midX = (node: LaidOutNode) => ((node.x0 ?? 0) + (node.x1 ?? 0)) / 2
+
+// A laid-out funnel tier node (manual layout — single vertically-centered bars).
+type FunnelNode = {
+  label: string
+  value: number
+  color: string
+  onClick?: () => void
+  x0: number
+  x1: number
+  cy: number
+  height: number
+}
+
+// A tapering ribbon band between two funnel nodes, filled (not stroked).
+const funnelBandPath = (a: FunnelNode, b: FunnelNode) => {
+  const top0 = a.cy - a.height / 2
+  const bot0 = a.cy + a.height / 2
+  const top1 = b.cy - b.height / 2
+  const bot1 = b.cy + b.height / 2
+  const mx = (a.x1 + b.x0) / 2
+  return (
+    `M${a.x1},${top0} C${mx},${top0} ${mx},${top1} ${b.x0},${top1} ` +
+    `L${b.x0},${bot1} C${mx},${bot1} ${mx},${bot0} ${a.x1},${bot0} Z`
+  )
+}
 
 // The editorial figure beside an end node: an eyebrow label, the total, and a
 // caption (e.g. "datasets total"). Mirrored for the right end.
@@ -303,12 +360,57 @@ function SankeyCenterLabel(props: {
   )
 }
 
+// Funnel mode: a tier's figure (count + name) in a fixed top row, centered on
+// its node, so the counts align like the stat boxes they replace.
+function SankeyTierLabel(props: {
+  cx: number
+  label: string
+  value: number
+  opacity: number
+  onMouseEnter: () => void
+  interactiveProps: InteractiveProps
+}): React.ReactNode {
+  const { cx, label, value, opacity, onMouseEnter, interactiveProps } = props
+  const theme = useTheme()
+  return (
+    <g
+      opacity={opacity}
+      className={styles.categoryLabel}
+      onMouseEnter={onMouseEnter}
+      {...interactiveProps}
+    >
+      <text
+        x={cx}
+        y={FUNNEL_GUTTER_TOP - 46}
+        textAnchor="middle"
+        fontSize={28}
+        fontWeight={600}
+        fill={theme.palette.primary.dark}
+        className={styles.tabularNums}
+      >
+        {value.toLocaleString()}
+      </text>
+      <text
+        x={cx}
+        y={FUNNEL_GUTTER_TOP - 26}
+        textAnchor="middle"
+        fontSize={11}
+        fontWeight={600}
+        letterSpacing={1.2}
+        fill={theme.palette.grey[700]}
+      >
+        {label.toUpperCase()}
+      </text>
+    </g>
+  )
+}
+
 export const SynapseSankeyPlot = (
   props: SynapseSankeyPlotProps,
 ): React.ReactNode => {
   const {
     sql,
-    rootLabel,
+    rootLabel = '',
     title,
     labelColumn,
     valueColumn,
@@ -321,10 +423,12 @@ export const SynapseSankeyPlot = (
     rightUnitLabel = 'items',
     onRightCategoryClick,
     onRightEndClick,
+    tiers,
   } = props
   const theme = useTheme()
   const gradientPrefix = useId()
 
+  const isFunnel = !!(tiers && tiers.length > 0)
   const hasRightFlow = rightValueColumn !== undefined
 
   // Index of the center node currently focused (null = nothing focused). Drives
@@ -353,14 +457,17 @@ export const SynapseSankeyPlot = (
   const queryRequest: QueryBundleRequest = {
     concreteType: 'org.sagebionetworks.repo.model.table.QueryBundleRequest',
     partMask: SynapseConstants.BUNDLE_MASK_QUERY_RESULTS,
-    entityId: parseEntityIdFromSqlStatement(sql),
+    entityId: sql ? parseEntityIdFromSqlStatement(sql) : 'syn0',
     query: {
-      sql,
+      sql: sql ?? '',
     },
   }
 
-  const { data: queryData, isLoading } =
-    useGetFullTableQueryResults(queryRequest)
+  // Funnel mode is fed by `tiers`, so the query is disabled there.
+  const { data: queryData, isLoading } = useGetFullTableQueryResults(
+    queryRequest,
+    { enabled: !isFunnel && !!sql },
+  )
 
   const rows = useMemo(
     () => queryData?.queryResult?.queryResults.rows ?? [],
@@ -515,9 +622,180 @@ export const SynapseSankeyPlot = (
     gutterTop,
   ])
 
-  if (isLoading) {
+  // Funnel mode: one vertically-centered bar per tier, evenly spaced, with
+  // tapering ribbons between them. Heights use a compressed (sqrt) scale mapped
+  // into a fixed band so a small tier and a huge tier are both legible (the
+  // exact counts are shown as labels); raw proportions would make 31 vs 48,000
+  // collapse one side to a hairline.
+  const funnelNodes = useMemo<FunnelNode[] | null>(() => {
+    if (!isFunnel || !tiers) {
+      return null
+    }
+    const tierList = tiers
+    const n = tierList.length
+    const gradientStart = tinycolor(theme.palette.primary.main).lighten(18)
+    const gradientEnd = tinycolor(theme.palette.primary.main).darken(12)
+    const tierColor = (index: number) =>
+      n <= 1
+        ? theme.palette.primary.main
+        : tinycolor
+            .mix(gradientStart, gradientEnd, (index / (n - 1)) * 100)
+            .toHexString()
+
+    const bandTop = FUNNEL_GUTTER_TOP
+    const bandBottom = FUNNEL_VIEW_H - FUNNEL_GUTTER_BOTTOM
+    const cy = (bandTop + bandBottom) / 2
+    const maxHeight = bandBottom - bandTop
+    const minHeight = Math.min(48, maxHeight)
+    const sq = (v: number) => Math.sqrt(Math.max(1, v))
+    const sqVals = tierList.map(t => sq(t.value))
+    const minS = Math.min(...sqVals)
+    const maxS = Math.max(...sqVals)
+    const heightFor = (v: number) =>
+      maxS === minS
+        ? maxHeight
+        : minHeight + (maxHeight - minHeight) * ((sq(v) - minS) / (maxS - minS))
+
+    const left = FUNNEL_GUTTER_X
+    const right = VIEW_W - FUNNEL_GUTTER_X
+    const step = n > 1 ? (right - left - NODE_WIDTH) / (n - 1) : 0
+    return tierList.map((t, index) => {
+      const x0 = left + index * step
+      return {
+        label: t.label,
+        value: t.value,
+        color: tierColor(index),
+        onClick: t.onClick,
+        x0,
+        x1: x0 + NODE_WIDTH,
+        cy,
+        height: heightFor(t.value),
+      }
+    })
+  }, [isFunnel, tiers, theme.palette.primary.main])
+
+  // Clicking a node briefly emphasizes it (a quick "swell") and then fires the
+  // handler, so the navigation feels intentional.
+  const activate = (index: number, fire: () => void) => {
+    if (clickTimer.current !== undefined) {
+      window.clearTimeout(clickTimer.current)
+    }
+    setClicked(index)
+    clickTimer.current = window.setTimeout(() => {
+      clickTimer.current = undefined
+      setClicked(null)
+      fire()
+    }, 320)
+  }
+
+  if (!isFunnel && isLoading) {
     return <Skeleton width={'100%'} height={'500px'} />
   }
+
+  if (isFunnel) {
+    if (!funnelNodes) {
+      return <></>
+    }
+    const focus = clicked ?? hovered
+    const dim = clicked !== null ? 0.12 : 0.2
+    // A ribbon connects tier i and i+1; it is active when either is focused.
+    const bandOpacity = (i: number) =>
+      focus === null ? 0.55 : focus === i || focus === i + 1 ? 0.95 : dim
+    const tierOpacity = (i: number) => (focus === null || focus === i ? 1 : dim)
+    const tierClickProps = (
+      index: number,
+      onClick: (() => void) | undefined,
+    ): InteractiveProps =>
+      onClick
+        ? { cursor: 'pointer', onClick: () => activate(index, onClick) }
+        : {}
+
+    return (
+      <div
+        className={classNames(styles.root, { [styles.rootVisible]: visible })}
+      >
+        {title && (
+          <div
+            className={styles.title}
+            style={{ fontFamily, color: textColor }}
+          >
+            {title}
+          </div>
+        )}
+        <svg
+          viewBox={`0 0 ${VIEW_W} ${FUNNEL_VIEW_H}`}
+          role="img"
+          aria-label={title ?? 'Resource overview'}
+          className={styles.svg}
+          style={{ fontFamily, maxWidth: VIEW_W }}
+          onMouseLeave={() => setHovered(null)}
+        >
+          <defs>
+            {funnelNodes.slice(1).map((node, i) => (
+              <linearGradient
+                key={i}
+                id={`${gradientPrefix}-funnel-${i}`}
+                gradientUnits="userSpaceOnUse"
+                x1={funnelNodes[i].x1}
+                x2={node.x0}
+              >
+                <stop offset="0%" stopColor={funnelNodes[i].color} />
+                <stop offset="100%" stopColor={node.color} />
+              </linearGradient>
+            ))}
+          </defs>
+
+          {/* Tapering ribbons between consecutive tiers */}
+          <g>
+            {funnelNodes.slice(1).map((node, i) => (
+              <path
+                key={i}
+                d={funnelBandPath(funnelNodes[i], node)}
+                fill={`url(#${gradientPrefix}-funnel-${i})`}
+                fillOpacity={bandOpacity(i)}
+                className={styles.node}
+              />
+            ))}
+          </g>
+
+          {/* Tier bars */}
+          <g>
+            {funnelNodes.map((node, i) => (
+              <rect
+                key={i}
+                x={node.x0}
+                y={node.cy - node.height / 2}
+                width={node.x1 - node.x0}
+                height={node.height}
+                rx={4}
+                fill={node.color}
+                fillOpacity={tierOpacity(i)}
+                stroke={theme.palette.background.paper}
+                strokeWidth={1}
+                className={styles.node}
+                onMouseEnter={() => setHovered(i)}
+                {...tierClickProps(i, node.onClick)}
+              />
+            ))}
+          </g>
+
+          {/* Tier figures */}
+          {funnelNodes.map((node, i) => (
+            <SankeyTierLabel
+              key={`tier-${i}`}
+              cx={(node.x0 + node.x1) / 2}
+              label={node.label}
+              value={node.value}
+              opacity={tierOpacity(i)}
+              onMouseEnter={() => setHovered(i)}
+              interactiveProps={tierClickProps(i, node.onClick)}
+            />
+          ))}
+        </svg>
+      </div>
+    )
+  }
+
   if (!graphResult) {
     return <></>
   }
@@ -551,23 +829,6 @@ export const SynapseSankeyPlot = (
   const labelOpacity = (sourceIndex: number) =>
     focusIndex === null || focusIndex === sourceIndex ? 1 : dimLabel
 
-  // Clicking a center flow briefly emphasizes it (a quick "swell") and then
-  // fires the handler, so the navigation feels intentional. No tabIndex/role:
-  // those make the browser draw a focus outline box around the SVG shape.
-  const activate = (sourceIndex: number, fire: () => void) => {
-    if (clickTimer.current !== undefined) {
-      window.clearTimeout(clickTimer.current)
-    }
-    setClicked(sourceIndex)
-    clickTimer.current = window.setTimeout(() => {
-      clickTimer.current = undefined
-      // Clear the transient emphasis before invoking the handler so the chart
-      // returns to its resting state for consumers whose handler doesn't
-      // navigate away (and unmount) the component.
-      setClicked(null)
-      fire()
-    }, 320)
-  }
   // Center flows swell on click; end nodes navigate immediately.
   const flowProps = (
     sourceIndex: number,

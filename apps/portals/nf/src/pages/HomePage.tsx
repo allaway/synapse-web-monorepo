@@ -2,12 +2,27 @@ import NFHeader from '@sage-bionetworks/synapse-portal-framework/components/nf/N
 import { SectionLayout } from '@sage-bionetworks/synapse-portal-framework/components/SectionLayout'
 import { mergeMeta } from '@sage-bionetworks/synapse-portal-framework/utils/mergeMeta'
 import type { MetaArgs, MetaDescriptor } from 'react-router'
+import { useNavigate } from 'react-router'
+import { Skeleton } from '@mui/material'
 import { CardContainerLogic } from 'synapse-react-client/components/CardContainerLogic/CardContainerLogic'
-import { Goals } from 'synapse-react-client/components/Goals/Goals'
+import SynapseSankeyPlot, {
+  type SankeyTier,
+} from 'synapse-react-client/components/Plot/SynapseSankeyPlot'
+import useGetQueryResultBundle from 'synapse-react-client/synapse-queries/entity/useGetQueryResultBundle'
+import { parseEntityIdFromSqlStatement } from 'synapse-react-client/utils/functions/SqlFunctions'
 import RssFeedCards from 'synapse-react-client/components/RssFeedCards/RssFeedCards'
 import { UserCardListRotate } from 'synapse-react-client/components/UserCardList/UserCardListRotate'
 import * as SynapseConstants from 'synapse-react-client/utils/SynapseConstants'
-import { fundersSql, peopleSql, topProjectsSql } from '../config/resources'
+import { QueryBundleRequest } from '@sage-bionetworks/synapse-types'
+import {
+  datasetsSql,
+  filesSql,
+  fundersSql,
+  initiativesSql,
+  peopleSql,
+  studiesSql,
+  topProjectsSql,
+} from '../config/resources'
 import { columnAliases } from '../config/synapseConfigs/commonProps'
 import {
   organizationCardSchema,
@@ -62,7 +77,62 @@ export function meta(args: MetaArgs): MetaDescriptor[] {
 
 const limit = 3
 
+// Total row count for a table query (uses the count part of the bundle so it
+// doesn't fetch rows).
+function useResourceCount(sql: string): number | undefined {
+  const request: QueryBundleRequest = {
+    concreteType: 'org.sagebionetworks.repo.model.table.QueryBundleRequest',
+    entityId: parseEntityIdFromSqlStatement(sql),
+    partMask: SynapseConstants.BUNDLE_MASK_QUERY_COUNT,
+    query: { sql },
+  }
+  const { data } = useGetQueryResultBundle(request)
+  return data?.queryCount
+}
+
 export default function HomePage() {
+  const navigate = useNavigate()
+  const initiativesCount = useResourceCount(initiativesSql)
+  const studiesCount = useResourceCount(studiesSql)
+  const datasetsCount = useResourceCount(datasetsSql)
+  const filesCount = useResourceCount(filesSql)
+  const resourceCountsLoaded = [
+    initiativesCount,
+    studiesCount,
+    datasetsCount,
+    filesCount,
+  ].every(count => count !== undefined)
+  // Initiatives -> Studies -> Datasets -> Files, each linking to its Explore page.
+  const resourceTiers: SankeyTier[] = [
+    {
+      label: 'Initiatives',
+      value: initiativesCount ?? 0,
+      onClick: () => {
+        navigate('/Explore/Initiatives')
+      },
+    },
+    {
+      label: 'Studies',
+      value: studiesCount ?? 0,
+      onClick: () => {
+        navigate('/Explore/Studies')
+      },
+    },
+    {
+      label: 'Datasets',
+      value: datasetsCount ?? 0,
+      onClick: () => {
+        navigate('/Explore/Datasets')
+      },
+    },
+    {
+      label: 'Files',
+      value: filesCount ?? 0,
+      onClick: () => {
+        navigate('/Explore/Files')
+      },
+    },
+  ]
   return (
     <>
       <NFHeader />
@@ -71,7 +141,11 @@ export default function HomePage() {
         centerTitle
         ContainerProps={{ className: 'home-spacer' }}
       >
-        <Goals entityId={'syn23516796'} />
+        {resourceCountsLoaded ? (
+          <SynapseSankeyPlot tiers={resourceTiers} />
+        ) : (
+          <Skeleton variant="rounded" width="100%" height={300} />
+        )}
       </SectionLayout>
       <div className={'home-bg-dark'}>
         <SectionLayout

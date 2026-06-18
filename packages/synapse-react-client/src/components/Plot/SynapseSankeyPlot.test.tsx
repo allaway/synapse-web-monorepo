@@ -198,6 +198,34 @@ describe('SynapseSankeyPlot', () => {
     })
   })
 
+  describe('funnel mode (tiers)', () => {
+    it('renders a node per tier with its count and label, and fires onClick on click', async () => {
+      const user = userEvent.setup()
+      const onStudies = vi.fn()
+      render(
+        <SynapseSankeyPlot
+          tiers={[
+            { label: 'Initiatives', value: 31 },
+            { label: 'Studies', value: 355, onClick: onStudies },
+            { label: 'Datasets', value: 173 },
+            { label: 'Files', value: 48115 },
+          ]}
+        />,
+        { wrapper: createWrapper() },
+      )
+
+      // Each tier shows its formatted count and uppercased label.
+      expect(await screen.findByText('31')).toBeInTheDocument()
+      expect(screen.getByText('48,115')).toBeInTheDocument()
+      expect(screen.getByText('INITIATIVES')).toBeInTheDocument()
+      expect(screen.getByText('FILES')).toBeInTheDocument()
+
+      // Clicking a tier fires its handler (after the brief swell delay).
+      await user.click(screen.getByText('355'))
+      await waitFor(() => expect(onStudies).toHaveBeenCalledTimes(1))
+    })
+  })
+
   it('renders nothing when the query returns no rows', async () => {
     getResultsSpy.mockResolvedValue(
       bundleWithColumns([{ name: 'source' }, { name: 'count' }], []),
